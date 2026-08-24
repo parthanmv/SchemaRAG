@@ -1,0 +1,524 @@
+{
+  "schema_name": "public",
+  "tables": [
+    {
+      "check_constraints": [
+        {
+          "expression": "classes_held >= 0 AND classes_attended >= 0 AND classes_attended <= classes_held",
+          "name": "ck_attendance_counts"
+        },
+        {
+          "expression": "attendance_percentage >= 0::numeric AND attendance_percentage <= 100::numeric",
+          "name": "ck_attendance_percentage"
+        }
+      ],
+      "columns": [
+        {
+          "data_type": "integer",
+          "default": "'nextval(\\'\"public\".attendance_attendance_id_seq\\'::regclass)'",
+          "name": "attendance_id",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "student_id",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "course_id",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "smallint",
+          "default": null,
+          "name": "classes_held",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "smallint",
+          "default": null,
+          "name": "classes_attended",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "numeric(5, 2)",
+          "default": null,
+          "name": "attendance_percentage",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "academic_year",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "smallint",
+          "default": null,
+          "name": "semester",
+          "nullable": false,
+          "primary_key": false
+        }
+      ],
+      "comment": null,
+      "foreign_keys": [
+        {
+          "columns": [
+            "course_id"
+          ],
+          "constraint_name": "attendance_course_id_fkey",
+          "on_delete": "CASCADE",
+          "referred_columns": [
+            "course_id"
+          ],
+          "referred_table": "courses"
+        },
+        {
+          "columns": [
+            "student_id"
+          ],
+          "constraint_name": "attendance_student_id_fkey",
+          "on_delete": "CASCADE",
+          "referred_columns": [
+            "student_id"
+          ],
+          "referred_table": "students"
+        }
+      ],
+      "name": "attendance",
+      "primary_keys": [
+        "attendance_id"
+      ],
+      "unique_constraints": [
+        {
+          "columns": [
+            "student_id",
+            "course_id",
+            "academic_year",
+            "semester"
+          ],
+          "enforced_as_index": false,
+          "name": "uq_attendance_student_course_term"
+        }
+      ]
+    },
+    {
+      "check_constraints": [
+        {
+          "expression": "credits >= 1 AND credits <= 6",
+          "name": "ck_courses_credits"
+        }
+      ],
+      "columns": [
+        {
+          "data_type": "integer",
+          "default": "'nextval(\\'\"public\".courses_course_id_seq\\'::regclass)'",
+          "name": "course_id",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "data_type": "varchar(12)",
+          "default": null,
+          "name": "course_code",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "text",
+          "default": null,
+          "name": "course_name",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "smallint",
+          "default": null,
+          "name": "credits",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "department_id",
+          "nullable": false,
+          "primary_key": false
+        }
+      ],
+      "comment": null,
+      "foreign_keys": [
+        {
+          "columns": [
+            "department_id"
+          ],
+          "constraint_name": "courses_department_id_fkey",
+          "on_delete": "RESTRICT",
+          "referred_columns": [
+            "department_id"
+          ],
+          "referred_table": "departments"
+        }
+      ],
+      "name": "courses",
+      "primary_keys": [
+        "course_id"
+      ],
+      "unique_constraints": [
+        {
+          "columns": [
+            "course_code"
+          ],
+          "enforced_as_index": false,
+          "name": "courses_course_code_key"
+        }
+      ]
+    },
+    {
+      "check_constraints": [],
+      "columns": [
+        {
+          "data_type": "integer",
+          "default": "'nextval(\\'\"public\".departments_department_id_seq\\'::regclass)'",
+          "name": "department_id",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "data_type": "text",
+          "default": null,
+          "name": "department_name",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "varchar(10)",
+          "default": null,
+          "name": "department_code",
+          "nullable": false,
+          "primary_key": false
+        }
+      ],
+      "comment": null,
+      "foreign_keys": [],
+      "name": "departments",
+      "primary_keys": [
+        "department_id"
+      ],
+      "unique_constraints": [
+        {
+          "columns": [
+            "department_code"
+          ],
+          "enforced_as_index": false,
+          "name": "departments_department_code_key"
+        },
+        {
+          "columns": [
+            "department_name"
+          ],
+          "enforced_as_index": false,
+          "name": "departments_department_name_key"
+        }
+      ]
+    },
+    {
+      "check_constraints": [
+        {
+          "expression": "semester >= 1 AND semester <= 8",
+          "name": "ck_enrollments_semester"
+        }
+      ],
+      "columns": [
+        {
+          "data_type": "integer",
+          "default": "'nextval(\\'\"public\".enrollments_enrollment_id_seq\\'::regclass)'",
+          "name": "enrollment_id",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "student_id",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "course_id",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "academic_year",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "smallint",
+          "default": null,
+          "name": "semester",
+          "nullable": false,
+          "primary_key": false
+        }
+      ],
+      "comment": null,
+      "foreign_keys": [
+        {
+          "columns": [
+            "course_id"
+          ],
+          "constraint_name": "enrollments_course_id_fkey",
+          "on_delete": "CASCADE",
+          "referred_columns": [
+            "course_id"
+          ],
+          "referred_table": "courses"
+        },
+        {
+          "columns": [
+            "student_id"
+          ],
+          "constraint_name": "enrollments_student_id_fkey",
+          "on_delete": "CASCADE",
+          "referred_columns": [
+            "student_id"
+          ],
+          "referred_table": "students"
+        }
+      ],
+      "name": "enrollments",
+      "primary_keys": [
+        "enrollment_id"
+      ],
+      "unique_constraints": [
+        {
+          "columns": [
+            "student_id",
+            "course_id",
+            "academic_year",
+            "semester"
+          ],
+          "enforced_as_index": false,
+          "name": "uq_enrollments_student_course_term"
+        }
+      ]
+    },
+    {
+      "check_constraints": [
+        {
+          "expression": "marks >= 0::numeric AND marks <= 100::numeric",
+          "name": "ck_marks_range"
+        },
+        {
+          "expression": "semester >= 1 AND semester <= 8",
+          "name": "ck_marks_semester"
+        }
+      ],
+      "columns": [
+        {
+          "data_type": "integer",
+          "default": "'nextval(\\'\"public\".marks_mark_id_seq\\'::regclass)'",
+          "name": "mark_id",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "student_id",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "course_id",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "varchar(20)",
+          "default": null,
+          "name": "exam_type",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "numeric(5, 2)",
+          "default": null,
+          "name": "marks",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "academic_year",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "smallint",
+          "default": null,
+          "name": "semester",
+          "nullable": false,
+          "primary_key": false
+        }
+      ],
+      "comment": null,
+      "foreign_keys": [
+        {
+          "columns": [
+            "course_id"
+          ],
+          "constraint_name": "marks_course_id_fkey",
+          "on_delete": "CASCADE",
+          "referred_columns": [
+            "course_id"
+          ],
+          "referred_table": "courses"
+        },
+        {
+          "columns": [
+            "student_id"
+          ],
+          "constraint_name": "marks_student_id_fkey",
+          "on_delete": "CASCADE",
+          "referred_columns": [
+            "student_id"
+          ],
+          "referred_table": "students"
+        }
+      ],
+      "name": "marks",
+      "primary_keys": [
+        "mark_id"
+      ],
+      "unique_constraints": [
+        {
+          "columns": [
+            "student_id",
+            "course_id",
+            "exam_type",
+            "academic_year",
+            "semester"
+          ],
+          "enforced_as_index": false,
+          "name": "uq_marks_student_course_exam_term"
+        }
+      ]
+    },
+    {
+      "check_constraints": [
+        {
+          "expression": "admission_year >= 2000 AND admission_year <= 2100",
+          "name": "ck_students_admission_year"
+        },
+        {
+          "expression": "semester >= 1 AND semester <= 8",
+          "name": "ck_students_semester"
+        }
+      ],
+      "columns": [
+        {
+          "data_type": "integer",
+          "default": "'nextval(\\'\"public\".students_student_id_seq\\'::regclass)'",
+          "name": "student_id",
+          "nullable": false,
+          "primary_key": true
+        },
+        {
+          "data_type": "varchar(20)",
+          "default": null,
+          "name": "roll_number",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "text",
+          "default": null,
+          "name": "name",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "varchar(255)",
+          "default": null,
+          "name": "email",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "department_id",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "smallint",
+          "default": null,
+          "name": "semester",
+          "nullable": false,
+          "primary_key": false
+        },
+        {
+          "data_type": "integer",
+          "default": null,
+          "name": "admission_year",
+          "nullable": false,
+          "primary_key": false
+        }
+      ],
+      "comment": null,
+      "foreign_keys": [
+        {
+          "columns": [
+            "department_id"
+          ],
+          "constraint_name": "students_department_id_fkey",
+          "on_delete": "RESTRICT",
+          "referred_columns": [
+            "department_id"
+          ],
+          "referred_table": "departments"
+        }
+      ],
+      "name": "students",
+      "primary_keys": [
+        "student_id"
+      ],
+      "unique_constraints": [
+        {
+          "columns": [
+            "email"
+          ],
+          "enforced_as_index": false,
+          "name": "students_email_key"
+        },
+        {
+          "columns": [
+            "roll_number"
+          ],
+          "enforced_as_index": false,
+          "name": "students_roll_number_key"
+        }
+      ]
+    }
+  ]
+}
