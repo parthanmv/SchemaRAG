@@ -7,30 +7,25 @@ interface QueryInputProps {
   value: string;
   onChange: (value: string) => void;
   onReset: () => void;
-  onGenerate: () => void;
   onExecute: () => void;
-  generating: boolean;
   executing: boolean;
 }
 
 /**
  * Question textarea with length validation, action buttons
- * (Generate SQL = generation-only, Run Query = full pipeline)
- * and a clear/reset control.
+ * (Run Query = full pipeline) and a clear/reset control.
  */
 export default function QueryInput({
   value,
   onChange,
   onReset,
-  onGenerate,
   onExecute,
-  generating,
   executing,
 }: QueryInputProps) {
   const trimmed = value.trim();
   const isValid =
     trimmed.length >= QUESTION_MIN_LENGTH && trimmed.length <= QUESTION_MAX_LENGTH;
-  const busy = generating || executing;
+  const busy = executing;
 
   return (
     <section aria-label="Question input" className="space-y-3">
@@ -59,9 +54,7 @@ export default function QueryInput({
         </p>
         <QueryActions
           onReset={onReset}
-          onGenerate={onGenerate}
           onExecute={onExecute}
-          generating={generating}
           executing={executing}
           canSubmit={isValid}
           hasInput={Boolean(value)}

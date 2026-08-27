@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
-import { ApiError, executeQuery, generateSql } from "./api/client";
-import type { GeneratedSQL, QueryResult } from "./api/types";
+import { ApiError, executeQuery } from "./api/client";
+import type { QueryResult } from "./api/types";
 import Header from "./components/Header";
 import HealthStatus from "./components/HealthStatus";
 import ExampleQuestions from "./components/ExampleQuestions";
@@ -9,25 +9,11 @@ import SQLViewer from "./components/SQLViewer";
 import { GroundingStatus, SecurityStatus } from "./components/StatusBadges";
 import RetrievalPanel, {
   ExecutionMeta,
-  GenerationMeta,
 } from "./components/RetrievalPanel";
 import ResultsTable from "./components/ResultsTable";
 import ErrorMessage from "./components/ErrorMessage";
 
 const SUCCESS_STATUSES = new Set(["success", "empty_result", "row_limit_exceeded"]);
-
-/** Friendly text for error codes returned inside 200 generation payloads. */
-const GENERATION_ERROR_MESSAGES: Record<string, string> = {
-  insufficient_context:
-    "Schema information is insufficient to generate a reliable query.",
-  invalid_response: "The AI service returned a response that could not be used.",
-  not_grounded: "Generated SQL references unknown database objects.",
-};
-
-function generationErrorMessage(error: string | null): string | null {
-  if (!error) return null;
-  return GENERATION_ERROR_MESSAGES[error] ?? error;
-}
 
 function SectionCard({
   title,
@@ -67,54 +53,27 @@ function SecurityRejection({ issues }: { issues: string[] }) {
 }
 
 /**
- * SchemaRAG frontend. Two independent workflows:
- *  - Generate SQL  -> POST /api/generate-sql (generation ONLY, never executed)
- *  - Execute Query -> POST /api/query        (grounding + security + read-only execution)
+ * SchemaRAG frontend. Execute workflow:
+ *  - Execute Query -> POST /api/query (grounding + security + read-only execution)
  * The browser never connects to PostgreSQL and never executes SQL itself.
  */
 export default function App() {
   const [question, setQuestion] = useState("");
-  const [generating, setGenerating] = useState(false);
   const [executing, setExecuting] = useState(false);
-  const [generation, setGeneration] = useState<GeneratedSQL | null>(null);
   const [result, setResult] = useState<QueryResult | null>(null);
-  const [genError, setGenError] = useState<string | null>(null);
   const [execError, setExecError] = useState<ApiError | string | null>(null);
 
   const reset = useCallback(() => {
     setQuestion("");
-    setGeneration(null);
     setResult(null);
-    setGenError(null);
     setExecError(null);
   }, []);
-
-  const handleGenerate = useCallback(async () => {
-    const q = question.trim();
-    if (!q) return;
-    setGenerating(true);
-    setGenError(null);
-    setExecError(null);
-    try {
-      setGeneration(await generateSql(q));
-    } catch (err) {
-      setGeneration(null);
-      setGenError(
-        err instanceof ApiError
-          ? err.message
-          : "SQL generation service is currently unavailable.",
-      );
-    } finally {
-      setGenerating(false);
-    }
-  }, [question]);
 
   const handleExecute = useCallback(async () => {
     const q = question.trim();
     if (!q) return;
     setExecuting(true);
     setExecError(null);
-    setGenError(null);
     try {
       const res = await executeQuery(q);
       setResult(res);
@@ -153,49 +112,11 @@ export default function App() {
             value={question}
             onChange={setQuestion}
             onReset={reset}
-            onGenerate={handleGenerate}
             onExecute={handleExecute}
-            generating={generating}
             executing={executing}
           />
-          <ExampleQuestions onSelect={setQuestion} disabled={generating || executing} />
+          <ExampleQuestions onSelect={setQuestion} disabled={executing} />
         </SectionCard>
-
-        {generating && (
-          <p role="status" data-testid="generating-indicator" className="text-sm text-slate-500">
-            Generating SQL…
-          </p>
-        )}
-        {genError && (
-          <ErrorMessage title="SQL generation failed" message={genError} />
-        )}
-
-        {generation && (
-          <SectionCard title="Generated SQL (not executed)">
-            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-              <GroundingStatus grounded={generation.grounded} />
-              {!generation.sql && generation.error && (
-                <span className="text-xs text-slate-500">
-                  {generationErrorMessage(generation.error)}
-                </span>
-              )}
-            </div>
-            {generation.sql ? (
-              <>
-                <SQLViewer sql={generation.sql} title="Generated SQL" />
-                <GenerationMeta gen={generation} />
-                <RetrievalPanel
-                  documents={generation.retrieved_documents}
-                  scores={generation.retrieval_scores}
-                />
-              </>
-            ) : (
-              <p className="text-sm italic text-slate-500">
-                No SQL was generated. Try rephrasing the question or pick an example.
-              </p>
-            )}
-          </SectionCard>
-        )}
 
         {execApiError?.kind === "security_rejected" && (
           <SecurityRejection issues={execApiError.issues} />

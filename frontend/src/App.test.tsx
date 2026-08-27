@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import App from "./App";
-import type { GeneratedSQL, QueryResult } from "./api/types";
+import type { QueryResult } from "./api/types";
 
 // ---------------------------------------------------------------------------
 // fetch mocking - no live Gemini, PostgreSQL or backend involved.
@@ -42,21 +42,6 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 // Fixtures matching the real backend contracts.
 // ---------------------------------------------------------------------------
-const GENERATION_OK: GeneratedSQL = {
-  question: "Which department has the highest average marks?",
-  sql: "SELECT d.department_name, AVG(m.marks) AS average_marks\nFROM departments d\nJOIN students s ON s.department_id = d.department_id\nJOIN marks m ON m.student_id = s.student_id\nGROUP BY d.department_name\nORDER BY average_marks DESC\nLIMIT 1",
-  model: "gemini-2.5-flash",
-  grounded: true,
-  retrieved_documents: [
-    "schema_departments",
-    "relationship_students_departments",
-    "query_example_dept_highest_avg_marks",
-  ],
-  retrieval_scores: [0.91, 0.84, 0.77],
-  issues: [],
-  error: null,
-};
-
 const QUERY_OK: QueryResult = {
   question: "How many students are there?",
   sql: 'SELECT COUNT(*) AS student_count FROM "students"',
@@ -108,7 +93,6 @@ describe("SchemaRAG App", () => {
     render(<App />);
     // Settle the async /health update before asserting on static UI.
     await screen.findByText(/Backend connected/i);
-    expect(screen.getByTestId("generate-button")).toBeDisabled();
     expect(screen.getByTestId("execute-button")).toBeDisabled();
   });
 
@@ -117,46 +101,6 @@ describe("SchemaRAG App", () => {
     const user = await typeQuestion("How many students are there?");
     await user.click(screen.getByRole("button", { name: "Clear" }));
     expect(screen.getByLabelText(/ask a question/i)).toHaveValue("");
-  });
-
-  it("generates SQL without executing it", async () => {
-    handler = (url) =>
-      url.endsWith("/api/generate-sql")
-        ? jsonResponse(200, GENERATION_OK)
-        : url.endsWith("/health")
-          ? jsonResponse(200, HEALTH_UP)
-          : jsonResponse(500, {});
-    render(<App />);
-    const user = await typeQuestion("Which department has the highest average marks?");
-    await user.click(screen.getByTestId("generate-button"));
-
-    expect(await screen.findByTestId("sql-viewer")).toHaveTextContent(/SELECT/i);
-    expect(screen.getByText("Grounded")).toBeInTheDocument();
-    expect(screen.getByText("gemini-2.5-flash")).toBeInTheDocument();
-    expect(screen.getByText(/Retrieved documents \(3\)/i)).toBeInTheDocument();
-
-    const calls = fetchMock.mock.calls;
-    expect(calls.some((c) => String(c[0]).endsWith("/api/query"))).toBe(false);
-  });
-
-  it("shows a loading state while generating SQL", async () => {
-    let resolveGen!: (v: Response) => void;
-    handler = (url) => {
-      if (url.endsWith("/api/generate-sql")) {
-        return new Promise<Response>((resolve) => {
-          resolveGen = resolve;
-        }) as unknown as Response;
-      }
-      return jsonResponse(200, HEALTH_UP);
-    };
-    render(<App />);
-    const user = await typeQuestion("How many students are there?");
-    await user.click(screen.getByTestId("generate-button"));
-    expect(await screen.findByTestId("generating-indicator")).toBeInTheDocument();
-    resolveGen(jsonResponse(200, GENERATION_OK));
-    await waitFor(() =>
-      expect(screen.queryByTestId("generating-indicator")).not.toBeInTheDocument(),
-    );
   });
 
   it("executes a query through POST /api/query and renders results", async () => {
@@ -205,18 +149,6 @@ describe("SchemaRAG App", () => {
     expect(await screen.findByText("NULL")).toBeInTheDocument();
   });
 
-  it("displays Not grounded when grounding fails", async () => {
-    handler = (url) =>
-      url.endsWith("/api/generate-sql")
-        ? jsonResponse(200, { ...GENERATION_OK, grounded: false, sql: null })
-        : jsonResponse(200, HEALTH_UP);
-    render(<App />);
-    const user = await typeQuestion("What is the meaning of life?");
-    await user.click(screen.getByTestId("generate-button"));
-    expect(await screen.findByText("Not grounded")).toBeInTheDocument();
-    expect(screen.getByText(/No SQL was generated/i)).toBeInTheDocument();
-  });
-
   it("maps HTTP 403 to the security rejection message", async () => {
     handler = (url) =>
       url.endsWith("/api/query")
@@ -232,32 +164,6 @@ describe("SchemaRAG App", () => {
     // Backend-provided reasons surface in the dedicated rejection panel.
     expect(screen.getByTestId("security-issues")).toHaveTextContent(
       /only SELECT\/WITH read queries are allowed/i,
-    );
-  });
-
-  it("maps HTTP 400 insufficient_context to its friendly message", async () => {
-    handler = (url) =>
-      url.endsWith("/api/generate-sql")
-        ? jsonResponse(400, { detail: { error: "insufficient_context", issues: [] } })
-        : jsonResponse(200, HEALTH_UP);
-    render(<App />);
-    const user = await typeQuestion("Tell me something interesting");
-    await user.click(screen.getByTestId("generate-button"));
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /Schema information is insufficient/i,
-    );
-  });
-
-  it("maps HTTP 502 to the LLM-unavailable message", async () => {
-    handler = (url) =>
-      url.endsWith("/api/generate-sql")
-        ? jsonResponse(502, {})
-        : jsonResponse(200, HEALTH_UP);
-    render(<App />);
-    const user = await typeQuestion("How many students are there?");
-    await user.click(screen.getByTestId("generate-button"));
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      /SQL generation service is currently unavailable/i,
     );
   });
 
@@ -299,27 +205,6 @@ describe("SchemaRAG App", () => {
     expect(screen.getByTestId("security-issues")).toHaveTextContent(
       "unknown table: users",
     );
-  });
-
-  it("maps generation error codes in 200 payloads to friendly messages", async () => {
-    handler = (url) =>
-      url.endsWith("/api/generate-sql")
-        ? jsonResponse(200, {
-            ...GENERATION_OK,
-            sql: null,
-            grounded: false,
-            error: "insufficient_context",
-          })
-        : jsonResponse(200, HEALTH_UP);
-    render(<App />);
-    const user = await typeQuestion("Tell me something interesting");
-    await user.click(screen.getByTestId("generate-button"));
-    expect(
-      await screen.findByText(
-        /Schema information is insufficient to generate a reliable query/i,
-      ),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("insufficient_context")).not.toBeInTheDocument();
   });
 
   it("survives malformed JSON responses", async () => {
