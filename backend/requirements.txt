@@ -7,7 +7,7 @@ pydantic-settings>=2.3.0
 
 # CPU-only PyTorch — prevents CUDA/NVIDIA packages on Render
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.3.1+cpu
+torch==2.13.0+cpu
 
 # Local embeddings + FAISS
 sentence-transformers>=3.0.0
