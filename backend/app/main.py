@@ -64,6 +64,7 @@ def create_app() -> FastAPI:
             "https://schema-reehx0c8v-parthanmvs-projects.vercel.app",
             "https://schema-rag-git-main-parthanmvs-projects.vercel.app",
             "https://schema-6dbdl4cva-parthanmvs-projects.vercel.app",
+            "https://schema-rag.vercel.app",
         ],
         allow_methods=["*"],
         allow_headers=["*"],
