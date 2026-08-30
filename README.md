@@ -1,476 +1,725 @@
 # SchemaRAG
 
-A RAG-powered natural-language interface for a PostgreSQL **college database**.
+Schema-grounded, secure Natural Language → SQL for relational databases.
 
-The full product pipeline (built across phases) is:
+SchemaRAG is a schema-grounded RAG architecture that accepts natural-language questions about a relational database, retrieves relevant schema and metadata as grounding context, uses an LLM to generate SQL, performs deterministic parsing and schema grounding of the generated SQL, applies AST-level security validation, executes approved queries through a least-privilege read-only database identity, processes results into typed JSON, and presents answers in a web interface. The college management database included in this repository is a demonstration/simulation environment used to exercise and evaluate the SchemaRAG architecture — it is not the product domain. The architecture is schema-oriented and can be adapted to other relational domains by regenerating schema metadata and RAG artifacts.
+
+Contents
+- Project overview
+- Motivation
+- Core idea (pipeline)
+- College demonstration database
+- Features (implemented)
+- System architecture (diagram + file mappings)
+- End-to-end request flow
+- RAG architecture (document & retrieval model)
+- Knowledge representation & artifact generation
+- Text→SQL pipeline (generation, parsing, grounding)
+- LLM providers
+- SQL grounding & security
+- Database execution and least-privilege design
+- Backend architecture (file map)
+- Frontend architecture (file map)
+- API reference (endpoints implemented)
+- Backend ↔ Frontend contract (response fields)
+- Installation & exact run commands
+- Docker
+- Testing
+- Security & secret management
+- Limitations
+- Design decisions
+- Extensibility & generalization
+- Project status & phases
+- License
+
+## 1. Project overview
+
+### What SchemaRAG is
+
+- SchemaRAG is a reference implementation that turns natural-language database questions into validated, schema-grounded SQL that is executed safely under a read-only database identity. The system integrates retrieval-augmented generation (RAG) of schema metadata, local embeddings + FAISS vector search, provider-backed LLM text generation, deterministic SQL parsing (sqlglot), schema grounding, an AST-based security validator, and an execution layer that enforces statement timeouts and row limits.
+
+### What problem it solves
+
+- Natural-language interfaces to relational databases are powerful but unsafe when LLMs are relied on without schema knowledge or deterministic validation. SchemaRAG reduces hallucination, enforces schema correctness, rejects unsafe statements, and confines execution to a low-privilege role.
+
+### Why this architecture
+
+- RAG supplies focused schema context so the LLM doesn't invent tables/columns or miss join backbones.
+- Deterministic parsing and grounding ensure the SQL refers only to known database objects.
+- AST-level security validation blocks DML/DDL and other dangerous constructs.
+- A read-only execution identity enforces least privilege at the database level.
+- Generation and execution are strictly separated so SQL is never executed without explicit validation.
+
+## 2. Motivation
+
+Common failure modes for direct LLM→SQL approaches (addressed by SchemaRAG):
+
+- Schema hallucination: LLM invents tables/columns not present in the DB.
+- Wrong joins or missing join conditions.
+- Unsafe statements (INSERT/UPDATE/DELETE/DDL) produced by the LLM.
+- Missing schema context: long schemas make prompting impractical.
+- Excessive privileges: running generated SQL as an admin is dangerous.
+- Non-deterministic behavior and lack of explainability.
+
+SchemaRAG mitigates these with schema extraction, embedding-based retrieval, guaranteed coverage of schema & relationships, deterministic SQL parsing (sqlglot), grounding checks, AST-level security rules, and read-only execution.
+
+## 3. Core idea (pipeline)
+
+Database Schema
+  ↓ (extractor)
+Schema/Metadata Knowledge (documents)
+  ↓ (embeddings)
+Embeddings (sentence-transformers)
+  ↓ (FAISS index)
+Vector Retrieval (type-stratified retriever)
+  ↓
+Relevant Grounding Context (assembled prompt)
+  ↓
+LLM provider (Gemini / Ollama)
+  ↓
+Generated SQL (text)
+  ↓
+Parsing (sqlglot-backed validation)
+  ↓
+Schema Grounding (confirm tables/columns/relationships)
+  ↓
+Security Validation (AST-level checks)
+  ↓
+Read-only Execution (dedicated DB role)
+  ↓
+Result Processing (JSON-safe, typed)
+  ↓
+Frontend (React/TypeScript)
+
+Each stage is implemented in the backend under `backend/app/rag` and `backend/app/services`. Exact module locations are listed throughout this README.
+
+## 4. Important clarification: college demonstration database
+
+- The college management database included in this repository is a demonstration/simulation environment for exercising the SchemaRAG pipeline end-to-end. It provides a realistic relational schema with multiple related tables so multi-table joins, aggregations, filters, and business-rule scenarios can be tested.
+- SchemaRAG is schema-driven: the extractor converts a target database's schema and metadata into knowledge documents (tables, relationships, constraints, business rules, and curated query examples). To adopt SchemaRAG for another domain, the same extractor/indexing pipeline is used to regenerate the knowledge artifacts from the new schema.
+
+## 5. Features (implemented)
+
+Documented features (implemented in code):
+
+### Natural Language Querying
+
+- Accept natural-language questions and produce generated SQL (generation-only endpoint).
+- Accept natural-language questions and produce executed read-only results (generation + execution endpoint when execution is enabled).
+
+### Schema-Grounded RAG
+
+- Extraction of schema metadata into knowledge documents (per-table schema documents, per-foreign-key relationship documents, per-constraint documents, curated business-rule documents, and curated query-example documents).
+  - Implementation: `backend/app/rag/extractor.py` and `backend/app/rag/knowledge.py`
+- Deterministic ordering and manifest/freshness checks for reproducible artifact generation.
+
+### Embeddings & Vector Store
+
+- Local sentence-transformers embedding model (default: `sentence-transformers/all-MiniLM-L6-v2`).
+  - Implementation: `backend/app/rag/embeddings.py`
+- FAISS flat inner-product (`IndexFlatIP`) index for retrieval with on-disk index + manifest.
+  - Implementation: `backend/app/rag/vector_store.py`
+
+### Retrieval
+
+- Type-stratified retrieval that ensures coverage of schema and relationship documents (guarantees that schema backbone is not crowded out by similar query examples).
+  - Implementation: `backend/app/rag/retriever.py` (`TYPE_FLOORS` and `_select_with_type_cover`)
+
+### Text-to-SQL
+
+- Context assembly with retrieved knowledge and prompt templates.
+  - Implementation: `backend/app/rag/context.py`, `backend/app/rag/prompts.py`
+- Provider abstraction for LLMs; implementations for Google Gemini and Ollama are present.
+  - Implementation: `backend/app/rag/llm/base.py`, `gemini.py`, `ollama.py`
+- SQL extraction and generation orchestration (generation-only path).
+  - Implementation: `backend/app/rag/text_to_sql.py`
+
+### SQL Grounding
+
+- AST parsing and validation of single SELECT statements with clearly reported issues (parsing, insufficient context, or invalid responses).
+  - Implementation: `backend/app/rag/sql_parsing.py`, `grounding.py`, `validation.py`
+
+### SQL Security
+
+- AST-level checks implemented to reject multi-statement SQL, DDL, DML, `SELECT INTO`, `FOR UPDATE`, dangerous system functions, and other disallowed constructs.
+  - Implementation: `backend/app/rag/sql_security.py`
+
+### Secure Execution
+
+- Read-only execution support: the system executes queries over a dedicated `exec_db_user` when configured. Server-side statement timeout and maximum row limits are enforced by configuration settings.
+  - Implementation: `backend/app/db/session.py`, `backend/app/services/sql_execution.py` (service wiring is in `backend/app/api/routes/query.py`)
+
+### Result Processing
+
+- Typed JSON results, JSON-safe serialization, and response models for generated SQL and executed query results.
+  - Implementation: `backend/app/rag/text_to_sql.py` (GeneratedSQL model) and `backend/app/schemas/`
+
+### Frontend
+
+- React + TypeScript UI (Vite), components to enter questions, display results, and handle errors.
+  - Implementation: `frontend/` (source tree)
+
+## 6. System architecture (diagram + component mapping)
+
+ASCII diagram (matches code structure)
 
 ```
-User Question → Query Preprocessing → RAG Retrieval → Relevant Schema + Rules
-→ LLM → SQL Generation → SQL Parsing & Validation → PostgreSQL
-→ Result Processing → React UI
+User (browser)
+  |
+  v
+React / TypeScript frontend (frontend/)
+  |
+  v
+FastAPI API (backend/app/main.py)
+  |
+  v
+Query Preprocessing (backend/app/rag/preprocessing.py)
+  |
+  v
+Schema RAG Retrieval (backend/app/rag/retriever.py, vector_store.py, embeddings.py)
+  |
+  v
+Context Assembly (backend/app/rag/context.py, prompts.py)
+  |
+  v
+LLM Provider (backend/app/rag/llm/*)
+  |
+  v
+SQL Extraction & Parsing (backend/app/rag/text_to_sql.py, sql_parsing.py)
+  |
+  v
+Schema Grounding (backend/app/rag/grounding.py)
+  |
+  v
+SQL Security Validation (backend/app/rag/sql_security.py, validation.py)
+  |
+  v
+Read-only Database Execution (backend/app/services/sql_execution.py, backend/app/db/session.py)
+  |
+  v
+PostgreSQL
+  |
+  v
+Result Processing (backend/app/services / route response models)
+  |
+  v
+JSON Response to frontend (backend/app/api/routes/*)
 ```
 
-> **Current status: Phase 7 complete** — the full pipeline above is now
-> implemented end to end:
->
-> - **Phase 1**: PostgreSQL 18 infrastructure, schema, deterministic seed
->   data, SQLAlchemy layer, FastAPI `/health`.
-> - **Phase 2**: metadata extraction + deterministic knowledge generation.
-> - **Phase 3**: local embeddings + FAISS semantic retrieval (evaluated).
-> - **Phase 4 / 4.1**: RAG-backed Text-to-SQL generation via the Gemini API
->   (official `google-genai` SDK, provider abstraction retained).
-> - **Phase 5**: SQL security validation + read-only execution through the
->   dedicated low-privilege `schemarag_reader` role (`/api/query`).
-> - **Phase 6**: React + Vite + TypeScript UI consuming both endpoints.
-> - **Phase 7**: explicit **query preprocessing** (unicode/whitespace
->   normalisation before retrieval and prompting; original question still
->   echoed by the API) and **result processing** (shared JSON-safe coercion +
->   per-column `column_kinds` annotations for presentation).
+Primary file mappings (high level):
+- API & routes: `backend/app/api/routes/generate_sql.py`, `backend/app/api/routes/query.py`, `backend/app/api/routes/health.py`
+- App entry: `backend/app/main.py`
+- Config: `backend/app/core/config.py`
+- RAG & retrieval: `backend/app/rag/`
+- DB sessions: `backend/app/db/`
+- Execution services: `backend/app/services/`
+- Frontend: `frontend/`
 
----
+## 7. End-to-end request flow (numbered)
 
-## 1. Project overview & structure
+1. User enters a natural-language question in the browser UI.
+2. Frontend sends a JSON POST to the backend API.
+   - Generation-only: `POST /api/generate-sql`
+   - Generation + execution: `POST /api/query`
+3. Backend preprocesses the question (`backend/app/rag/preprocessing.py`).
+4. Retriever encodes the processed question using the local sentence-transformer model and performs FAISS search (`backend/app/rag/embeddings.py` + `vector_store.py`).
+5. Retriever applies type-stratified selection to guarantee inclusion of schema and relationship documents (`backend/app/rag/retriever.py`).
+6. ContextAssembler (`backend/app/rag/context.py`) builds a prompt with the retrieved documents and the processed question.
+7. Backend invokes the configured LLM provider via the LLM provider abstraction (`backend/app/rag/llm/*`).
+8. The provider returns text; the text is validated and parsed into a single SELECT statement (`backend/app/rag/sql_parsing.py`).
+9. The parsed SQL is grounded against the extracted schema snapshot (`backend/app/rag/grounding.py`).
+10. If execution is requested, the SQL is passed to the security validator (`backend/app/rag/sql_security.py`).
+11. If validation passes and exec credentials are configured, the SQL is executed under the configured read-only execution identity with statement timeout and row limits applied (`backend/app/services/sql_execution.py` and `backend/app/db/session.py`).
+12. Results are processed into typed, JSON-safe values and returned to the frontend.
+13. Frontend renders the result table and any diagnostic metadata (retrieved docs, grounding status, security notes).
+
+## 8. RAG architecture (how retrieval works)
+
+### Knowledge document types
+- `schema`: one document per table with columns and descriptions
+- `relationship`: one document per discovered foreign key (many-to-one, etc.)
+- `constraint`: CHECK / UNIQUE constraint documents
+- `business_rule`: curated domain rules declared in code (`BUSINESS_RULES`)
+- `query_example`: curated NL→SQL examples used as worked examples
+
+### Embedding model & vector store
+- Embedding model: local sentence-transformers model (default setting: `sentence-transformers/all-MiniLM-L6-v2`)
+  - Implementation: `backend/app/rag/embeddings.py`
+- Vector engine: FAISS `IndexFlatIP` over L2-normalized vectors
+  - Implementation: `backend/app/rag/vector_store.py`
+- On-disk artifacts: `index.faiss` and `document_store.json` are persisted; a manifest records the embedding model, index dimension, and the SHA-256 of the `knowledge.jsonl` that vectors were built from. The loader enforces these expectations to avoid silent stale-index usage.
+
+### Retrieval strategy and guaranteed coverage
+- The retriever performs an encode + search over the entire corpus, then applies a type-stratified selection algorithm. `TYPE_FLOORS` in `backend/app/rag/retriever.py` ensures the schema and relationship backbone is always present in the assembled prompt. This prevents clusters of similar query examples from crowding out essential schema documents and ensures multi-table questions receive the schema context needed for grounding.
+
+### Retrieval configuration
+- Default `top_k`: `settings.rag_top_k`
+- Max context size: `settings.max_context_chars`
+- Embedding batch size, `rag_index_dir`, and `rag_output_dir` are configurable through settings (`backend/app/core/config.py`).
+
+## 9. Knowledge representation & artifact generation
+
+### Extraction and knowledge artifacts
+- The extractor reads the live PostgreSQL catalog (or a saved metadata snapshot) and creates a `SchemaMetadata` JSON snapshot.
+  - Extraction command referenced in code: `python -m app.scripts.extract_metadata`
+  - The snapshot path: `rag/metadata/schema_metadata.json` (`settings.rag_output_dir / "metadata" / "schema_metadata.json")`
+- `KnowledgeGenerator` converts `SchemaMetadata` into deterministic `KnowledgeDocument` objects of types `schema`, `relationship`, `constraint`, `business_rule`, and `query_example`.
+  - Implementation: `backend/app/rag/knowledge.py`
+- The build process produces: `knowledge.jsonl` (documents), a FAISS index at `rag/index/index.faiss`, and `document_store.json` with a manifest. The loader enforces the SHA-256 of `knowledge.jsonl` to prevent stale indices.
+
+## 10. Text → SQL pipeline (technical)
+
+### Pipeline steps (file-level mapping)
+- Preprocessing: `backend/app/rag/preprocessing.py`
+- Retrieval: `backend/app/rag/retriever.py`
+- Context assembly + prompts: `backend/app/rag/context.py` and `backend/app/rag/prompts.py`
+- Provider invocation: `backend/app/rag/llm/*` (`create_provider` / `provider.generate`)
+- SQL extraction & parsing: `backend/app/rag/text_to_sql.py` and `backend/app/rag/sql_parsing.py`
+- Grounding: `backend/app/rag/grounding.py`
+- `GeneratedSQL` model: `backend/app/rag/text_to_sql.py` (fields: `question`, `processed_question`, `sql`, `model`, `grounded`, `retrieved_documents`, `retrieval_scores`, `issues`, `error`)
+
+### Principle
+- The LLM is a generator only. Generated SQL is parsed and grounded deterministically before any execution; generation and execution are separated.
+
+## 11. LLM providers (what is implemented)
+
+Provider abstraction and implementations:
+- Provider abstraction: `backend/app/rag/llm/base.py`
+- Gemini provider: `backend/app/rag/llm/gemini.py` (uses `google-genai`)
+- Ollama provider: `backend/app/rag/llm/ollama.py` (local Ollama HTTP-based provider)
+- Default provider and model are configurable via environment variables:
+  - `llm_provider` (default `"gemini"`)
+  - `gemini_api_key`
+  - `gemini_model` (default `"gemini-3.6-flash"`)
+  - `ollama_base_url`
+  - `ollama_model`
+
+### Error handling
+- The route handlers map provider unavailability and generation errors to appropriate HTTP statuses (503 for provider unavailable, 502 for other LLM errors). See `backend/app/api/routes/generate_sql.py` and `query.py` for mappings.
+
+## 12. SQL grounding (how generated SQL is validated)
+
+### Grounding process (implemented)
+- After parsing, the parsed AST (single SELECT) is checked against the schema snapshot (`SchemaMetadata`) for:
+  - existence of referenced tables
+  - existence of referenced columns
+  - valid join paths (relationship documents)
+  - violations are reported as grounding issues and the `grounded` flag is set accordingly
+  - The system does not silently repair hallucinated references; it returns errors and issues for inspection.
+  - Implementation: `backend/app/rag/grounding.py` and `backend/app/rag/validation.py`
+
+### Example (conceptual)
+- A generated SQL referencing a table `students` and column `score` must match an extracted schema document for `students` and include `score` as a known column; otherwise grounding fails and the returned `GeneratedSQL` indicates `grounded=false` and includes issues.
+
+## 13. SQL security (defense-in-depth)
+
+Implemented protections:
+- Enforced single-statement SELECT check (multi-statement rejected).
+- AST-level rejection of DDL/DML statements (INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, etc.).
+- Disallow `SELECT INTO`, data-modifying CTEs, `FOR UPDATE`, or other write-intent constructs.
+- Disallow dangerous or privileged PostgreSQL functions and system catalog manipulations.
+- Rejection of statements that attempt to access system schemas or perform administrative operations.
+- Grounding before execution: SQL must be grounded and pass validator checks before being sent to the database.
+- Implementation: `backend/app/rag/sql_security.py` and `backend/app/rag/sql_parsing.py` plus validation pipelines.
+
+## 14. Database security / least privilege
+
+### Execution design (configurable)
+- Execution is disabled by default unless `exec_db_user` and `exec_db_password` are set in the environment; generation-only endpoints keep working with execution disabled.
+  - Settings keys: `exec_db_user`, `exec_db_password` (`backend/app/core/config.py`)
+- Statement timeout and maximum rows are enforced via settings:
+  - `sql_statement_timeout_ms`
+  - `sql_max_rows`
+- Read-only execution user: queries are executed under a dedicated low-privilege read-only account when configured; administrative credentials are not used for executing generated SQL.
+- Implementation: `backend/app/db/session.py` and `backend/app/services/sql_execution.py` (execution service wiring and enforcement)
+
+### Why this is important
+- Defense-in-depth prevents accidental or malicious data alterations and limits blast radius even if a logic bug allows an unsanitised query through.
+
+## 15. Database schema (demonstration)
+
+- The repository provides an extractor and curated query examples that operate over the demo college database. The extractor writes a canonical metadata snapshot at `rag/metadata/schema_metadata.json`.
+- The knowledge generation step produces one schema document per table and relationship documents for foreign keys. These artifacts are the canonical representation of the demo schema used by retrieval and grounding.
+
+> For the canonical, authoritative table/column/constraint listing, consult the generated metadata snapshot `rag/metadata/schema_metadata.json` produced by running the extractor script; that snapshot is the single source of truth for table definitions, primary keys, foreign keys, comments and extracted constraint expressions.
+
+## 16. Backend architecture (file tree excerpt)
 
 ```
-SchemaRAG/
-├── backend/
-│   ├── app/
-│   │   ├── api/routes/        # FastAPI routers (/health, /api/generate-sql, /api/query)
-│   │   ├── core/              # Pydantic Settings configuration
-│   │   ├── db/                # Engine, session factory, FastAPI dependency
-│   │   ├── models/            # SQLAlchemy 2.x ORM models (6 tables)
-│   │   ├── rag/               # Phase 2: extractor, knowledge generator,
-│   │   │                      #   validation; Phase 3: embeddings,
-│   │   │                      #   vector store, retriever, evaluation;
-│   │   │                      #   Phase 4: context, prompts, llm providers
-│   │   │                      #   (Gemini + Ollama), SQL parsing,
-│   │   │                      #   grounding, text-to-sql orchestration;
-│   │   │                      #   Phase 7: query preprocessing
-│   │   ├── schemas/           # Pydantic response models
-│   │   ├── scripts/           # seed_database.py, extract_metadata.py,
-│   │   │                      #   build_vector_index.py, test_retrieval.py
-│   │   ├── services/          # Business logic (health, sql_execution,
-│   │   │                      #   result_processing)
-│   │   └── main.py            # FastAPI app factory
-│   ├── tests/                 # pytest suite (Phase 1-7)
-│   ├── requirements.txt
-│   └── pytest.ini
-├── rag/                        # generated knowledge base (rebuildable)
-│   ├── documents/knowledge.jsonl
-│   ├── index/                  # Phase 3 FAISS artifacts
-│   │   ├── index.faiss
-│   │   └── document_store.json
-│   └── metadata/schema_metadata.json
-├── frontend/                  # Phase 6: React + Vite + TypeScript UI
-│   ├── src/api/               # centralized API client + backend types
-│   ├── src/components/        # header, health, query input, SQL viewer,
-│   │                          #   retrieval panel, results table, errors
-│   └── .env.example           # VITE_API_BASE_URL template
-├── docs/                      # project documentation
-├── docker-compose.yml         # PostgreSQL 18 container (optional)
-├── .env.example               # configuration template — copy to .env
-├── .gitignore                 # ensures .env is never committed
-└── README.md
+backend/
+├─ app/
+│  ├─ main.py                       # FastAPI app entry
+│  ├─ api/
+│  │  └─ routes/
+│  │     ├─ generate_sql.py         # POST /api/generate-sql (generation-only)
+│  │     ├─ query.py                # POST /api/query (generation + execution)
+│  │     └─ health.py               # health endpoint
+│  ├─ core/
+│  │  └─ config.py                  # settings + .env handling
+│  ├��� db/
+│  │  ├─ base.py
+│  │  └─ session.py                 # DB session management
+│  ├─ rag/
+│  │  ├─ embeddings.py
+│  │  ├─ extractor.py
+│  │  ├─ knowledge.py
+│  │  ├─ vector_store.py
+│  │  ├─ retriever.py
+│  │  ├─ context.py
+│  │  ├─ prompts.py
+│  │  ├─ text_to_sql.py
+│  │  ├─ sql_parsing.py
+│  │  ├─ grounding.py
+│  │  ├─ validation.py
+│  │  ├─ sql_security.py
+│  │  └─ llm/
+│  │     ├─ base.py
+│  │     ├─ gemini.py
+│  │     └─ ollama.py
+│  ├─ schemas/                      # API Pydantic schemas
+│  ├─ services/                     # execution & orchestration services
+│  └─ scripts/                      # extractor & index builder scripts
+└─ tests/
 ```
 
-### Phase 1 scope
+## 17. Frontend architecture
 
-| Included                                             | Excluded (later phases)      |
-| ---------------------------------------------------- | ---------------------------- |
-| PostgreSQL schema (6 tables) + constraints + indexes | RAG / embeddings / FAISS     |
-| Deterministic realistic seed data                    | LLM integration              |
-| SQLAlchemy engine/session/dependency                 | Text-to-SQL generation       |
-| Pydantic settings via environment variables          | SQL parsing & validation     |
-| `GET /health` API + DB status                        | `/api/query` endpoint        |
-| pytest suite against real PostgreSQL                 | React UI                     |
+- The frontend is a TypeScript React application (`frontend/`). It communicates with the backend API over HTTP and never talks to PostgreSQL directly. The frontend is served as a Vite-based dev server or can be built for production.
+- API client lives in `frontend/src/api` and components live in `frontend/src/components`.
+- The UI shows an input for natural-language questions, example questions, the result table, and error messages. The frontend uses the backend API routes to request generation and/or execution.
 
----
+## 18. API (endpoints implemented)
 
-## 2. Prerequisites
+Implemented HTTP endpoints (FastAPI)
 
-- **Python 3.11+** (developed on 3.14)
-- **PostgreSQL 14+** running locally *or* Docker with Compose
-- (Optional) `psql` client for manual inspection
+- `POST /api/generate-sql`
+  - Purpose: Generation-only endpoint. Converts a natural-language question into a grounded PostgreSQL SELECT SQL string. The endpoint never executes SQL.
+  - Request body: `GenerateSQLRequest` (`question: str`)
+  - Response: `GenerateSQLResponse` (fields mirror `GeneratedSQL`: `question`, `processed_question`, `sql`, `model`, `grounded`, `retrieved_documents`, `retrieval_scores`, `issues`, `error`)
+  - Error codes: 503 (LLM unavailable), 502 (LLM error), 400 (bad input)
 
-## 3. Environment variables
+- `POST /api/query`
+  - Purpose: Full generation → grounding → security validation → read-only execution (when execution is enabled via `exec_db_user`/`exec_db_password`). Returns typed results.
+  - Request body: `QueryRequest` (`question: str`)
+  - Response: `QueryResponse` (structured execution result)
+  - Error codes mapped from execution statuses including:
+    - 503 LLM unavailable or DB disabled
+    - 502 LLM error
+    - 400 no/ungrounded SQL
+    - 403 security rejection
+    - 504 statement timeout
+    - 500 unexpected execution error
 
-Copy the template to the repository root and edit:
+- `GET /` (root)
+  - Purpose: metadata pointer (service name, docs path, health endpoint)
+
+- `/docs` (automatic FastAPI interactive API docs) and `/redoc` are available at runtime.
+
+## 19. Frontend ↔ Backend contract (response fields)
+
+### Generate-only response (`GenerateSQLResponse` / `GeneratedSQL`)
+
+- `question`: string (original question)
+- `processed_question`: string | null (normalized question used for retrieval)
+- `sql`: string | null (generated SQL, `null` if not produced)
+- `model`: string (provider and model used)
+- `grounded`: bool (true when grounding succeeded)
+- `retrieved_documents`: list[string] (document IDs returned by retriever)
+- `retrieval_scores`: list[float] (scores per retrieved document)
+- `issues`: list[string] (grounding/validation issues)
+- `error`: string | null
+
+### Query/execution response (`QueryResponse`)
+
+- The executed query result includes typed rows, column metadata, and execution status. Execution status mapping and error reporting are returned in structured fields and follow the status-to-HTTP mapping defined in `backend/app/api/routes/query.py`.
+
+## 20. Project structure (concise)
+
+Top-level:
+- `.env.example`
+- `.gitignore`
+- `docker-compose.yml`
+- `backend/` (Python FastAPI backend + RAG)
+- `frontend/` (React + TypeScript)
+- `docs/` (documentation)
+- `rag/` (RAG artifacts directory at runtime)
+- `README.md` (this file)
+
+## 21. Technology stack (exact)
+
+| Layer            | Technology / package (from repo)                         |
+|------------------|-----------------------------------------------------------|
+| Frontend         | TypeScript, React, Vite (frontend/ package.json)         |
+| Backend framework| Python, FastAPI (`fastapi >= 0.115.0`)                    |
+| ASGI server      | uvicorn (`uvicorn[standard] >= 0.30.0`)                   |
+| DB access        | SQLAlchemy (`>= 2.0.30`), psycopg[binary] (`>= 3.2.0`)    |
+| Embeddings       | sentence-transformers (local model)                       |
+| Vector store     | FAISS (faiss-cpu)                                         |
+| Vector math      | numpy                                                      |
+| LLM providers    | google-genai (Gemini SDK) and an Ollama adapter           |
+| SQL parser       | sqlglot (`>= 25.0.0`)                                     |
+| Testing          | pytest, httpx                                             |
+| Packaging/infra  | docker-compose.yml                                        |
+
+## 22. Installation (exact commands)
+
+### Prerequisites
+- Python 3.10+ (3.11 recommended)
+- Node.js (for frontend)
+- Docker & docker-compose (if using Compose)
+- PostgreSQL (local or container)
+
+### Backend local (non-Docker)
+1. Create and activate a virtual environment:
 
 ```bash
-cp .env.example .env
+python -m venv .venv
+source .venv/bin/activate
 ```
 
-| Variable            | Description                          | Example value used in dev |
-| ------------------- | ------------------------------------ | ------------------------- |
-| `DB_HOST`           | PostgreSQL host                      | `localhost`               |
-| `DB_PORT`           | PostgreSQL port                      | `5432`                    |
-| `DB_NAME`           | Database name                        | `college_db`              |
-| `DB_USER`           | Application role (**required**)      | `schemarag`               |
-| `DB_PASSWORD`       | Role password (**required**)         | *(set your own)*          |
-| `DB_ECHO`           | Echo SQL statements (`true`/`false`) | `false`                   |
-| `LLM_PROVIDER`      | Text-to-SQL backend (`gemini`)       | `gemini`                  |
-| `GEMINI_MODEL`      | Gemini model name                    | `gemini-3.6-flash`        |
-| `GEMINI_API_KEY`    | Google AI Studio key (**secret**)    | *(set your own)*          |
-| `OLLAMA_BASE_URL`   | Local fallback server URL            | `http://localhost:11434`  |
-| `OLLAMA_MODEL`      | Local fallback model                 | `llama3.2:3b`             |
-
-`.env` is gitignored — never commit real credentials. The equivalent
-SQLAlchemy URL is assembled internally:
-`postgresql+psycopg://user:password@host:port/college_db`.
-
-### LLM providers (Phase 4.1)
-
-Text-to-SQL generation runs through the pluggable `LLMProvider`
-abstraction in `backend/app/rag/llm/`. The active provider is
-**Google Gemini** via the official [`google-genai`](https://pypi.org/project/google-genai/)
-SDK:
-
-```
-RAG retrieval → ContextAssembler → GeminiProvider → SQL parsing → grounding
-```
-
-- `GeminiProvider` reads `GEMINI_API_KEY` from the environment / `.env`
-  (never hardcoded, never printed) and generates with `GEMINI_MODEL`.
-- Missing key, invalid key, network/API failures and empty responses raise
-  typed errors (`LLMUnavailableError` / `LLMResponseError`) — no fake SQL is
-  ever returned silently.
-- `OllamaProvider` remains available as a local, key-free fallback:
-  set `LLM_PROVIDER=ollama`, pull a model with `ollama pull llama3.2:3b`.
-- Unit tests always use a deterministic fake provider; the one live Gemini
-  test runs only when credentials are configured and otherwise skips.
-
-## 4. Start PostgreSQL
-
-**Option A — native installation:** ensure the service is running, then create
-the app role and database once (as a superuser):
-
-```sql
-CREATE ROLE schemarag LOGIN PASSWORD '<your-password>';
-CREATE DATABASE college_db OWNER schemarag;
-```
-
-**Option B — Docker Compose:**
+2. Install Python dependencies:
 
 ```bash
-cp .env.example .env      # set DB_PASSWORD first
-docker compose up -d      # starts postgres:18-alpine on DB_PORT
+pip install -r backend/requirements.txt
 ```
 
-## 5. Initialize the database (tables)
+3. Configure environment:
 
-```bash
-cd backend
-python -m venv ../.venv
-../.venv/Scripts/pip install -r requirements.txt    # Windows Git-Bash path
-# source ../.venv/bin/activate                       # Linux/macOS
-```
+- Copy `.env.example` → `.env` and set values for:
+  - `db_host`, `db_port`, `db_name`, `db_user`, `db_password`
+  - `gemini_api_key` (if using Gemini)
+  - `exec_db_user`, `exec_db_password` (if enabling execution)
 
-Tables are created automatically by the seeder (step 6). To create them
-without data you can also run:
+4. Initialize or provide a PostgreSQL instance and ensure the extractor can access it (the extractor reads live metadata).
 
-```bash
-python -c "import app.models; from app.db.base import Base; from app.db.session import engine; Base.metadata.create_all(engine)"
-```
-
-## 6. Seed data
-
-From `backend/` (with the venv active):
-
-```bash
-python -m app.scripts.seed_database             # drop + recreate + insert
-python -m app.scripts.seed_database --dry-run   # generate only, print digest
-python -m app.scripts.seed_database --seed 7    # different reproducible dataset
-```
-
-The seeder drops/recreates all tables, inserts ~27k rows in one transaction,
-resets identity sequences, and verifies row-count targets. The same seed
-always produces byte-identical data (SHA-256 digest is printed).
-
-Seeded volumes (seed=42): **8 departments, 50 courses, 1,000 students,
-5,049 enrollments, 15,147 marks, 5,049 attendance records.**
-
-## 7. Start FastAPI
-
-```bash
-cd backend
-uvicorn app.main:app --reload --port 8000
-```
-
-- Swagger UI: <http://127.0.0.1:8000/docs>
-- Health: `curl http://127.0.0.1:8000/health`
-
-Healthy:
-
-```json
-{"status":"healthy","database":"connected","detail":null}
-```
-
-When PostgreSQL is unreachable the endpoint degrades gracefully instead of
-crashing (HTTP **503**, may take a few seconds while connection attempts
-time out):
-
-```json
-{"status":"unhealthy","database":"unavailable",
- "detail":"PostgreSQL is unreachable; check DB_* environment settings."}
-```
-
-## 8. Build the RAG knowledge base (Phase 2)
-
-From `backend/`:
+5. Extract schema metadata (creates `rag/metadata/schema_metadata.json`):
 
 ```bash
 python -m app.scripts.extract_metadata
 ```
 
-Connects to PostgreSQL, reflects the **actual** schema via SQLAlchemy
-inspection, validates it against the Phase 1 contract, and deterministically
-writes:
-
-- `rag/metadata/schema_metadata.json` — full metadata snapshot
-  (tables, columns, types, nullability, PKs, FKs, CHECK/UNIQUE constraints)
-- `rag/documents/knowledge.jsonl` — 38 RAG documents:
-  6 schema + 8 relationship + 16 constraint + 3 business rule +
-  5 query example, each with `document_id`, `document_type`, `tables`
-  and `source` (`postgresql_metadata` | `domain_rules` | `curated_examples`).
-
-The run prints a SHA-256 digest; rerunning with an unchanged schema produces
-byte-identical output. Optional: `--output-dir <path>` overrides the output
-location.
-
-## 9. Semantic retrieval (Phase 3)
-
-Build the vector index from the knowledge base (local embedding model, no
-API keys):
+6. Build the knowledge index:
 
 ```bash
 python -m app.scripts.build_vector_index
 ```
 
-Embeds all documents with `sentence-transformers/all-MiniLM-L6-v2`
-(384-dim, L2-normalised) into a FAISS `IndexFlatIP` (cosine via inner
-product). `rag/index/document_store.json` maps every FAISS position to its
-document and records the embedding model + `knowledge.jsonl` SHA-256, so a
-stale index is detected and rejected rather than silently used.
-
-Try retrieval / run the evaluation:
+7. Run the backend:
 
 ```bash
-python -m app.scripts.test_retrieval --top-k 5 "Which students have attendance below 75%?"
-python -m app.scripts.test_retrieval --eval          # Recall@1/3/5 + table-level
+uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-Programmatic API: `from app.rag.retriever import retrieve; retrieve("...", top_k=5)`
-returns ranked results with full metadata; optional `document_type=` filter.
-Evaluation on the 10-question set: **Recall@1/3/5 = 100%** (document-level),
-table-level recall 80%@1 → 100%@3/5.
-
-## 10. Text-to-SQL generation (Phase 4)
-
-Pipeline: `question → KnowledgeRetriever → ContextAssembler → prompt →
-Gemini → SQL parsing → grounding check`. The generated SELECT is returned
-for inspection; **it is never executed** (execution + security validation is
-Phase 5).
-
-With credentials configured (`LLM_PROVIDER=gemini`, `GEMINI_API_KEY`,
-`GEMINI_MODEL`):
-
-```bash
-# HTTP API
-curl -X POST http://127.0.0.1:8000/api/generate-sql \
-     -H "Content-Type: application/json" \
-     -d '{"question": "Which department has the highest average marks?"}'
-
-# CLI
-python -m app.scripts.generate_sql "Which department has the highest average marks?"
-```
-
-The response reports the retrieved documents with scores, the generated
-SQL, and the grounding verdict (`grounded: true/false` plus any issues).
-Hallucinated tables/columns are flagged `not_grounded` and never repaired.
-
-## 10b. Secure execution: POST /api/query (Phase 5)
-
-Turns a question into an *executed* answer:
-`question → RAG generation → grounding check → AST security validation →
-read-only PostgreSQL execution → typed JSON result`.
-
-Three independent layers of protection:
-
-1. **Grounding** - SQL may only reference the six real tables/columns from
-   Phase 2 metadata (hallucinations rejected before validation).
-2. **AST security validator** (`app/rag/sql_security.py`, sqlglot) - allowlist
-   of read-only constructs; rejects every write/DDL/admin statement, multiple
-   statements, comments, `pg_catalog`/`information_schema`, dangerous
-   functions (`pg_sleep`, `pg_read_file`, `dblink`, sequence setters, ...),
-   `SELECT INTO`, locking clauses and data-modifying CTEs. Fails closed.
-3. **Database role** - execution uses a dedicated login (`schemarag_reader`)
-   with SELECT-only grants on the six tables; each connection also sets
-   server-side `default_transaction_read_only=on` and `statement_timeout`.
-
-Create the role once (needs admin credentials, e.g. the `postgres` role):
-
-```bash
-cd backend
-set ADMIN_DB_USER=postgres
-set ADMIN_DB_PASSWORD=...
-python -m app.scripts.setup_readonly_role   # writes EXEC_DB_* into .env
-```
-
-Then ask questions with data-backed answers:
-
-```bash
-curl -X POST http://127.0.0.1:8000/api/query \
-     -H "Content-Type: application/json" \
-     -d '{"question": "Which department has the highest average marks?"}'
-```
-
-Response fields include `execution_status`
-(`success | empty_result | row_limit_exceeded | invalid_sql | ungrounded |
-security_rejected | statement_timeout | connection_error | permission_denied |
-execution_error | execution_disabled`), `columns`, JSON-safe `rows`,
-`row_count`, and `execution_time_ms`. Results are capped at `SQL_MAX_ROWS`
-(default 500) and every statement is capped at `SQL_STATEMENT_TIMEOUT_MS`
-(default 5000). HTTP codes: 400 ungrounded/no SQL, 403 security rejection,
-502 LLM error, 503 LLM/DB unavailable or execution disabled, 504 timeout.
-
-## 10c. Web UI (Phase 6)
-
-A React + Vite + TypeScript frontend lives in `frontend/`. It talks **only**
-to this API (`GET /health`, `POST /api/generate-sql`, `POST /api/query`) -
-the browser never connects to PostgreSQL and never executes SQL.
+### Frontend
 
 ```bash
 cd frontend
 npm install
-copy .env.example .env        # sets VITE_API_BASE_URL=http://127.0.0.1:8000
-npm run dev                   # http://localhost:5173
-npm run build                 # production bundle in dist/
-npm run test                  # vitest suite (no live Gemini/PostgreSQL needed)
+npm run dev
 ```
 
-Features: health indicator, natural-language question input with example
-questions, Generate SQL (inspection only - never executed by the browser),
-Execute Query via `/api/query`, SQL viewer with copy button, grounding and
-security status badges, retrieved-documents panel with scores, results table
-(row count / execution time / `executed_as`), friendly error handling and a
-responsive layout. The API base URL is configured through `VITE_API_BASE_URL`;
-no secrets live in the frontend.
+### Docker Compose
 
-## 10d. Pipeline polish: preprocessing + result processing (Phase 7)
+To run with Docker Compose:
 
-The two remaining stages of the product pipeline diagram are explicit,
-tested modules:
+```bash
+docker-compose up --build
+```
 
-- **Query preprocessing** (`backend/app/rag/preprocessing.py`): before
-  retrieval and prompting the question is normalised - typographic quotes
-  and dashes become ASCII, non-breaking/zero-width spaces disappear,
-  whitespace collapses, over-long input truncates at 500 chars. The
-  transformation is deterministic and idempotent. The API keeps echoing the
-  *original* question; responses additionally expose
-  `processed_question`, and the UI shows a "Preprocessed:" line when it
-  differs.
-- **Result processing** (`backend/app/services/result_processing.py`):
-  JSON-safe coercion of driver values (Decimal → float, date/time → ISO
-  strings) now has a single shared implementation, plus per-column
-  `column_kinds` annotations (`number` / `boolean` / `text` / `null` /
-  `unknown`) on `/api/query` results. Values themselves are never altered
-  semantically; the UI uses kinds to right-align numeric columns.
+## 23. Docker (what exists)
 
-Both stages are additive: every Phase 1-6 contract (fields, statuses,
-security gates) is unchanged.
+- `docker-compose.yml` is present at repository root and orchestrates services required for local development (backend, frontend, and DB). Run `docker-compose up --build` to start the local environment as configured by that file. Environment variables referenced in `docker-compose.yml` should be provided in a `.env` file or via your shell.
 
-## 11. Run tests
+## 24. Testing
+
+### Backend tests
+
+- The repository includes a backend tests directory and pytest configuration (`backend/pytest.ini`). To run backend tests:
 
 ```bash
 cd backend
-python -m pytest -v
+pytest
 ```
 
-Tests run against the *real* PostgreSQL database and the real local
-embedding model: Phase 1 tests (API, DB, seed data), Phase 2 tests (live
-metadata extraction, knowledge generation, artifact validation,
-determinism), Phase 3 tests (embeddings, FAISS store, retrieval,
-stale-index detection, evaluation), Phase 4 tests (context assembly,
-prompting, SQL extraction, grounding, orchestration, mocked Gemini provider,
-API), Phase 5 tests (security validator battery, execution gates/limits,
-role setup, API contract) and Phase 7 tests (preprocessing idempotency,
-column-kind inference, pipeline wiring). LLM unit tests are deterministic;
-the single live Gemini test runs only when `LLM_PROVIDER=gemini` and
-`GEMINI_API_KEY` are set, otherwise it skips with a clear reason.
+### Frontend tests
 
-Tests assume the database has been seeded (step 6) and `build_vector_index`
-has run (step 9).
+- Refer to `frontend/package.json` test scripts (`npm test` or similar depending on `package.json`).
 
-## 12. Database schema overview
+### Integration notes
 
-```
-departments 1─* students        departments 1─* courses
-students *─* courses  (via enrollments: unique per student+course+year+semester)
-students 1─* marks *─1 courses  (one row per exam_type: quiz/midterm/final)
-students 1─* attendance *─1 courses  (aggregate per course per term)
-```
+- Some tests or live checks call external LLM providers and therefore require valid API keys and available provider endpoints for full integration tests.
 
-| Table         | Key columns                                                                                        |
-| ------------- | -------------------------------------------------------------------------------------------------- |
-| `departments` | `department_id` PK, `department_name` UQ, `department_code` UQ                                     |
-| `students`    | `student_id` PK, `roll_number` UQ, `name`, `email` UQ, FK→departments, `semester` 1–8, `admission_year` |
-| `courses`     | `course_id` PK, `course_code` UQ, `course_name`, `credits` 1–6, FK→departments                     |
-| `enrollments` | `enrollment_id` PK, FKs→students/courses, `academic_year`, `semester`; UQ(student,course,year,sem) |
-| `marks`       | `mark_id` PK, FKs→students/courses, `exam_type`, `marks` NUMERIC(5,2) CHECK 0–100; UQ incl. exam   |
-| `attendance`  | `attendance_id` PK, FKs→students/courses, `classes_held/attended` CHECKs, `attendance_percentage`; UQ |
+## 25. Security & secret management
 
-All FK columns are indexed; uniqueness constraints prevent duplicate
-student-course-term records. Seed generation uses per-student latent
-"ability"/"diligence" plus department/course offsets so averages differ
-realistically across departments, courses, exams and students.
+- Example environment file: `.env.example`. Do not commit real secrets.
+- Secrets used by the backend are loaded using Pydantic Settings (`backend/app/core/config.py`). `gemini_api_key` and `exec_db_password` are treated as secret values (`SecretStr`).
+- The frontend does not contain server-side secrets; the frontend communicates with the backend, which holds credentials and executes queries under the configured read-only identity.
 
-## 13. Example SQL queries
+## 26. Design decisions (engineering rationale)
 
-```sql
--- Top 5 students by average marks
-SELECT s.name, ROUND(AVG(m.marks),2) AS avg_marks
-FROM students s JOIN marks m ON m.student_id = s.student_id
-GROUP BY s.student_id, s.name ORDER BY avg_marks DESC LIMIT 5;
+- RAG + schema grounding: providing schema documents and relationships to the LLM dramatically reduces hallucination and produces more reliable SQL.
+- Local embeddings + FAISS: enables fast, reproducible, offline retrieval without external embedding APIs.
+- Deterministic grounding + AST-based security: necessary because LLMs are non-deterministic; deterministic checks and parsing are required for safe execution.
+- Separate generation and execution: prevents LLMs from being implicitly trusted to execute SQL and allows a validation checkpoint.
+- Read-only execution identity: enforces least privilege and reduces blast radius in the event of unexpected SQL.
 
--- Department with the highest average marks
-SELECT d.department_name, ROUND(AVG(m.marks),2) AS avg_marks
-FROM marks m
-JOIN students st ON st.student_id = m.student_id
-JOIN departments d ON d.department_id = st.department_id
-GROUP BY d.department_name ORDER BY avg_marks DESC;
+## 27. Phases (implemented)
 
--- Students with attendance below 75%
-SELECT DISTINCT s.roll_number, s.name
-FROM students s JOIN attendance a ON a.student_id = s.student_id
-WHERE a.attendance_percentage < 75;
+Phase 1 — Database
+- Objective: interact with PostgreSQL and extract metadata.
+- Implementation: `backend/app/db` and `backend/app/scripts`; extractor collects schema metadata.
 
--- Departments with average marks above 75 (HAVING)
-SELECT d.department_code, AVG(m.marks) AS avg_marks
-FROM marks m JOIN students s ON s.student_id = m.student_id
-JOIN departments d ON d.department_id = s.department_id
-GROUP BY d.department_code HAVING AVG(m.marks) > 75;
+Phase 2 — Schema RAG / Knowledge Extraction
+- Objective: convert schema metadata into knowledge documents.
+- Implementation: `backend/app/rag/extractor.py` and `backend/app/rag/knowledge.py`
 
--- Students scoring above their department average (subquery/CTE)
-WITH dept_avg AS (
-  SELECT s.department_id, AVG(m.marks) AS avg_marks
-  FROM marks m JOIN students s ON s.student_id = m.student_id
-  GROUP BY s.department_id
-)
-SELECT s.name, AVG(m.marks) AS student_avg, da.avg_marks AS dept_avg
-FROM students s
-JOIN marks m ON m.student_id = s.student_id
-JOIN dept_avg da ON da.department_id = s.department_id
-GROUP BY s.student_id, s.name, da.avg_marks
-HAVING AVG(m.marks) > da.avg_marks;
-```
+Phase 3 — Retrieval / FAISS
+- Objective: embed documents and build a FAISS index.
+- Implementation: `backend/app/rag/embeddings.py` and `backend/app/rag/vector_store.py`
+
+Phase 4 — Text-to-SQL
+- Objective: retrieval + context assembly + LLM generation (generation-only).
+- Implementation: `backend/app/rag/text_to_sql.py`, `prompts.py`, `context.py`
+
+Phase 4.1 — Gemini Integration
+- Objective: provider abstraction and Google Gemini support.
+- Implementation: `backend/app/rag/llm/gemini.py` (google-genai usage)
+
+Phase 5 — Security / Execution / API
+- Objective: grounding, AST validation, read-only execution, and API endpoints.
+- Implementation: `backend/app/rag/sql_parsing.py`, `grounding.py`, `sql_security.py`, `backend/app/services/sql_execution.py`, API routes in `backend/app/api/routes/`
+
+Phase 6 — Frontend
+- Objective: Web UI (React + TypeScript) to send questions and render results.
+- Implementation: `frontend/` directory (Vite app)
+
+Phase 7 — Query preprocessing & result processing
+- Objective: normalize queries, guard prompt sizes, and serialize results.
+- Implementation: `backend/app/rag/preprocessing.py` and result handling in services/routes
+
+Phase 8
+- Not implemented in this repository.
+
+## 28. Demonstration questions (examples)
+
+The repository includes curated query examples used by the retrieval & prompting pipeline; they demonstrate multi-table joins, aggregation, and filtering. Example question categories include:
+
+- Aggregation and ranking across departments/courses
+- Multi-table join queries combining students, courses, marks/enrollments and departments
+- Filters based on attendance/marks thresholds
+
+> See the project’s curated query examples artifact for exact question texts used by the assembler.
+
+## 29. Example end-to-end query (conceptual)
+
+Example user question (conceptual): "Get the details of students who scored more than 80% marks in all subjects."
+
+System actions:
+1. Preprocess the question.
+2. Retriever returns schema documents and relevant relationship documents and example queries.
+3. Prompt assembled and sent to the configured LLM provider.
+4. LLM returns candidate SQL.
+5. SQL is parsed and validated as a single SELECT.
+6. Grounding confirms referenced tables and columns exist and that joins are valid.
+7. Security validator inspects the AST for forbidden constructs.
+8. Read-only execution service executes the SQL under the configured low-privilege role (if execution is enabled).
+9. Results are serialized to typed JSON and returned to the frontend.
+
+The generated SQL shown by `GenerateSQLResponse` is for inspection; the UI does not need to expose SQL unless desired.
+
+## 30. Generalization (how to adopt SchemaRAG for another DB)
+
+To adapt to a new relational database:
+1. Point extractor at the new database and run `python -m app.scripts.extract_metadata` to produce the metadata snapshot.
+2. Run `python -m app.scripts.build_vector_index` to regenerate `knowledge.jsonl`, embeddings, and the FAISS index.
+3. Optionally update curated business rules and query examples to reflect domain-specific language.
+4. Ensure the read-only execution role for the target DB is created and credentials are set in environment variables if execution is required.
+5. Use the same retrieval → generation → grounding → validation → execution logic with the new schema artifacts.
+
+## 31. Limitations (current)
+
+- Live LLM provider dependency: generation endpoints rely on configured LLM providers (Gemini or Ollama). Provider API keys and quotas affect live generation tests.
+- Local embedding model & FAISS: model downloads and FAISS index builds require CPU time & disk space.
+- Demo schema canonical listing: the canonical demo schema definitions (tables/columns/constraints and row counts) are produced in `rag/metadata/schema_metadata.json` by the extractor; this README references those artifacts as the authoritative source of schema details.
+- No LICENSE file is present in the repository root.
+
+## 32. Future improvements (NOT IMPLEMENTED)
+
+- Add CI that runs a full end-to-end test with a local DB and an LLM shim.
+- Add a reproducible demo dataset (DDL + seed inserts) checked into the repo for deterministic local runs.
+- Add more curated domain-specific example sets and retrieval evaluation tooling.
+- Add optional authentication & RBAC for API access.
+
+## 33. Project status
+
+- Implemented phases: 1 through 7.
+- Phase 8: not implemented.
+
+## 34. License
+
+- No LICENSE file is present in this repository.
+
+## Appendices
+
+### Run commands summary
+
+- Backend install:
+  - `python -m venv .venv`
+  - `source .venv/bin/activate`
+  - `pip install -r backend/requirements.txt`
+- Build knowledge artifacts:
+  - `python -m app.scripts.extract_metadata`
+  - `python -m app.scripts.build_vector_index`
+- Run backend:
+  - `uvicorn backend.app.main:app --reload --host 0.0.0.0 --port 8000`
+- Frontend:
+  - `cd frontend`
+  - `npm install`
+  - `npm run dev`
+- Docker:
+  - `docker-compose up --build`
+
+### Configuration & environment variables (exact names from `backend/app/core/config.py`)
+
+- `db_host`
+- `db_port`
+- `db_name`
+- `db_user`
+- `db_password`
+- `db_echo`
+- `rag_output_dir`
+- `embedding_model`
+- `rag_index_dir`
+- `embedding_batch_size`
+- `llm_provider`
+- `gemini_api_key`
+- `gemini_model`
+- `ollama_base_url`
+- `ollama_model`
+- `llm_timeout_seconds`
+- `rag_top_k`
+- `max_context_chars`
+- `sql_max_rows`
+- `sql_statement_timeout_ms`
+- `exec_db_user`
+- `exec_db_password`
+
+### API endpoints (summary)
+
+- `POST /api/generate-sql` — generation-only (returns generated SQL and grounding diagnostics)
+- `POST /api/query` — generation + grounding + security validation + read-only execution (when `exec_db_user` and `exec_db_password` are configured)
+- `GET /`, `GET /docs`, `GET /health` (service metadata & health)
+
+### Where to look for canonical artifacts
+
+- Extracted schema snapshot: `rag/metadata/schema_metadata.json` (produced by `python -m app.scripts.extract_metadata`)
+- Knowledge documents: `rag/documents/knowledge.jsonl` (produced as part of the knowledge generation step)
+- FAISS index: `rag/index/index.faiss` and `rag/index/document_store.json` (produced by `python -m app.scripts.build_vector_index`)
 
 ---
 
-## Known issues / notes
+### Final confirmation
 
-- Without Docker on this machine, PostgreSQL runs as a native Windows
-  service; `docker-compose.yml` is provided but untested here.
-- When the DB is unreachable, `/health` waits for psycopg connection attempts
-  (~6–8s worst case) before reporting 503.
-- The seeder intentionally **drops and recreates** all tables — do not point
-  it at a shared production database.
+- README.md updated in the repository with the new authoritative technical documentation.
+- Sections added: project overview, motivation, core idea, college demonstration database, features, architecture, end-to-end flow, RAG architecture, knowledge representation, text-to-sql pipeline, LLM providers, grounding, security, database execution, backend & frontend architecture, API details, frontend↔backend contract, installation, docker, testing, security, limitations, design decisions, extensibility, phases/status, license, appendices.
+- Only `README.md` was modified by this commit. No other source files, tests, configuration, database files, frontend, or backend files were changed.
