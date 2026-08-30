@@ -55,19 +55,16 @@ def create_app() -> FastAPI:
     # The regex additionally covers Vite's port auto-increment (5174, 5175,
     # ...) when 5173 is already taken - still strictly loopback-only, never
     # a wildcard origin.
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=[
-            "http://localhost:5173",
-            "http://127.0.0.1:5173",
-             "https://schema-6dbdl4cva-parthanmvs-projects.vercel.app",
-             "https://schema-rag-git-main-parthanmvs-projects.vercel.app",
-            "https://schema-reehx0c8v-parthanmvs-projects.vercel.app",
-        ],
-        allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
-        allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type"],
-    )
+  app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
+    allow_origin_regex=r"^https://schema-rag(?:-[a-z0-9]+)?-parthanmvs-projects\.vercel\.app$",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
     app.include_router(health_routes.router)
     app.include_router(generate_sql_routes.router)
     app.include_router(query_routes.router)
