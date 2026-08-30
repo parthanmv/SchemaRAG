@@ -61,10 +61,13 @@ def create_app() -> FastAPI:
         allow_origins=[
             "http://localhost:5173",
             "http://127.0.0.1:5173",
+            "https://schema-reehx0c8v-parthanmvs-projects.vercel.app",
+            "https://schema-rag-git-main-parthanmvs-projects.vercel.app",
+            "https://schema-6dbdl4cva-parthanmvs-projects.vercel.app",
         ],
-        allow_origin_regex=r"^https://schema-rag(?:-[a-z0-9]+)?-parthanmvs-projects\.vercel\.app$",
-        allow_methods=["GET", "POST", "OPTIONS"],
-        allow_headers=["Content-Type"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+        allow_credentials=True,
     )
 
     app.include_router(health_routes.router)
