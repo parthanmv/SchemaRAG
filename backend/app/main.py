@@ -64,7 +64,7 @@ def create_app() -> FastAPI:
     allow_origin_regex=r"^https://schema-rag(?:-[a-z0-9]+)?-parthanmvs-projects\.vercel\.app$",
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["Content-Type"],
-)
+  )
     app.include_router(health_routes.router)
     app.include_router(generate_sql_routes.router)
     app.include_router(query_routes.router)
