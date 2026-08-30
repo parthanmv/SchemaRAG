@@ -175,6 +175,49 @@ def test_context_never_invents_content():
 
 
 # ---------------------------------------------------------------------------
+# 3b. Retrieval type-cover regression (generalized "all subjects" fix)
+# ---------------------------------------------------------------------------
+def test_type_cover_keeps_backbone_when_examples_dominate():
+    """Regression: a run of high-scoring query examples must not crowd the
+    schema/relationship/business-rule backbone out of a multi-table query.
+
+    The old score-only ``top_k`` selection let 4-5 semantically similar query
+    examples edge past the courses schema, the 80% mark-scale rule and the
+    relationship documents, so "students who scored >80% in ALL subjects" could
+    no longer be constructed or grounded (retrieval-recall failure). The
+    generic fix floors schema/relationship/business_rule coverage so the join
+    backbone always reaches the LLM and the grounding check.
+    """
+    from app.rag.retriever import TYPE_FLOORS, _select_with_type_cover
+
+    # Worst case: six near-identical query examples dominate the top scores.
+    ranked = [
+        _result(f"query_example_q{i}", "query_example", score=0.95 - i * 0.01)
+        for i in range(6)
+    ]
+    ranked += [
+        _result("schema_students", "schema", score=0.50),
+        _result("schema_marks", "schema", score=0.50),
+        _result("schema_courses", "schema", score=0.50),
+        _result("relationship_marks_student_id_fkey", "relationship", score=0.40),
+        _result("relationship_marks_course_id_fkey", "relationship", score=0.40),
+        _result("business_rule_marks_scale", "business_rule", score=0.20),
+    ]
+
+    chosen = _select_with_type_cover(ranked, 16, TYPE_FLOORS)
+    ids = {r.document_id for r in chosen}
+
+    for schema in ("schema_students", "schema_marks", "schema_courses"):
+        assert schema in ids, f"schema backbone document dropped: {schema}"
+    assert "relationship_marks_student_id_fkey" in ids
+    assert "relationship_marks_course_id_fkey" in ids
+    assert "business_rule_marks_scale" in ids
+    # Query examples that crowd the top still make it (they are still best
+    # scoring) - but they no longer displace the backbone.
+    assert any(i.startswith("query_example_q") for i in ids)
+
+
+# ---------------------------------------------------------------------------
 # 4. Prompt construction
 # ---------------------------------------------------------------------------
 REQUIRED_HEADERS = (

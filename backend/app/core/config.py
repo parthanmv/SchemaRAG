@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "llama3.2:3b"
     llm_timeout_seconds: float = 120.0
-    rag_top_k: int = 8
+    rag_top_k: int = 16
     max_context_chars: int = 6000
 
     # Phase 5: read-only SQL execution.

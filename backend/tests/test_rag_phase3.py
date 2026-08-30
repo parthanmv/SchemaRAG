@@ -197,6 +197,36 @@ def test_results_are_ranked_descending(rag_retriever):
     assert scores == sorted(scores, reverse=True)
 
 
+def test_complex_relational_question_keeps_schema_backbone(rag_retriever):
+    """Regression: a complex multi-table relational question must never be
+    starved of the schema/relationship/business-rule backbone it needs to be
+    constructed AND grounded.
+
+    "scored more than 80% in ALL subjects" requires the students + marks +
+    courses schema, the marks<->students and marks<->courses joins, and the
+    80% mark-scale rule. Purely score-based top-k let a run of similar query
+    examples crowd these information-dense documents out of the context. The
+    type-stratified selection (schema/relationship/business-rule floors) is the
+    GENERIC fix: it guarantees the backbone for every multi-table query, not
+    just this one.
+    """
+    question = (
+        "Get me the details of students who scored more than 80% marks in all subject"
+    )
+    results = rag_retriever.retrieve(question, top_k=16)
+    ids = {r.document_id for r in results}
+    # 1. Every table definition is always surfaced (schema floor = all).
+    for schema in ("schema_students", "schema_marks", "schema_courses",
+                   "schema_enrollments", "schema_attendance",
+                   "schema_departments"):
+        assert schema in ids, f"missing required schema document: {schema}"
+    # 2. The join backbone a student -> marks -> course query needs.
+    assert "relationship_marks_student_id_fkey" in ids
+    assert "relationship_marks_course_id_fkey" in ids
+    # 3. The domain rule that resolves "80% marks".
+    assert "business_rule_marks_scale" in ids
+
+
 def test_top_k_controls_result_count(rag_retriever):
     for k in (1, 3, 10):
         results = rag_retriever.retrieve("marks constraints", top_k=k)
