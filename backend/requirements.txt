@@ -5,18 +5,20 @@ psycopg[binary]>=3.2.0
 pydantic>=2.7.0
 pydantic-settings>=2.3.0
 
-# Phase 3: local embeddings + FAISS retrieval
+# CPU-only PyTorch — prevents CUDA/NVIDIA packages on Render
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.3.1+cpu
+
+# Local embeddings + FAISS
 sentence-transformers>=3.0.0
 faiss-cpu>=1.8.0
 numpy>=1.26.0
 
-# Phase 4: SQL extraction/parsing/grounding over generated statements
+# SQL parsing / grounding
 sqlglot>=25.0.0
 
-# Phase 4.1: Google Gemini LLM (official SDK; replaces direct Ollama usage)
+# Google Gemini
 google-genai>=2.0.0
-# Imported directly by app.rag.llm.gemini for network-error classification
-# (also a transitive dependency of google-genai)
 requests>=2.31.0
 
 # Testing
